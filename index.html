@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CRM Ventas Pro - Tablero Interactivo Avanzado</title>
+  
+  <link rel="icon" href="https://raw.githubusercontent.com/jarodlopez/Ventas-MM/refs/heads/main/MM-Logo-N.png" type="image/png" />
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.min.js"></script>
+
+  <style>
+    .pipeline-scroll { scroll-snap-type: x mandatory; }
+    .pipeline-col { scroll-snap-align: start; min-height: 60vh; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; }
+    ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .glass-modal { background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(2px); }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3b82f6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .dragging { opacity: 0.5; transform: scale(0.98); }
+    .drag-over { background-color: rgba(203, 213, 225, 0.8) !important; border: 2px dashed #94a3b8; }
+    .pulse-badge { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .stat-card { transition: all 0.3s ease; }
+    .stat-card:hover { transform: translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.1); }
+    .smooth-transition { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900 h-screen flex flex-col overflow-hidden">
+  
+  <div id="root" class="h-full flex flex-col"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useCallback } = React;
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAAETou6DhYIJJ8cxI13BU1p_l3yGPMilA",
+      authDomain: "ventas-ebd49.firebaseapp.com",
+      projectId: "ventas-ebd49",
+      storageBucket: "ventas-ebd49.firebasestorage.app",
+      messagingSenderId: "907042495792",
+      appId: "1:907042495792:web:6827da0b73333496f6bcf5"
+    };
+    
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const auth = firebase.auth();
+
+    const PIPELINE_STATUSES = ["Con oferta", "Acepta oferta", "Long track", "Dispersado", "Rechazado", "Cancelado", "Expirado"];
+    
+    const LOST_REASONS = [
+      "No contesta / Inlocalizable",
+      "Oferta expirada",
+      "Tasa/Condiciones no favorables",
+      "Se fue con la competencia",
+      "No cumple requisitos / Buro",
+      "Cliente se arrepintió",
+      "Otro motivo"
+    ];
+
+    // 🎯 CONFIGURACIÓN DE COMISIONES
+    const COMMISSION_CONFIG = {
+      'Dispersado': 0.02, // 2% por dispersión
+      'Acepta oferta': 0.005, // 0.5% por aceptación
+      'Long track': 0.0025 // 0.25% mantener en seguimiento
+    };
+
+    // Funciones auxiliares mejoradas
+    const parseDate = (input) => {
+      if (!input) return new Date();
+      if (input.toDate) return input.toDate();
+      const d = new Date(input);
+      return isNaN(d) ? new Date() : d;
+    };
+
+    const money = (val) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(val || 0);
+    const moneyUSD = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(val || 0);
+    const formatDate = (input) => new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', hour:'2-digit', minute:'2-digit' }).format(parseDate(input));
+    const formatDateFull = (input) => new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(parseDate(input));
+
+    const getQuincena = (date) => date.getDate() <= 15 ? 1 : 2;
+
+    const getBusinessDaysQuincena = (targetDate, quincena) => {
+      const year = targetDate.getFullYear();
+      const month = targetDate.getMonth();
+      const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
+      const startDay = quincena === 1 ? 1 : 16;
+      const endDay = quincena === 1 ? 15 : lastDayOfMonth;
+      let totalBusinessDays = 0, remainingDays = 0;
+      
+      const today = new Date();
+      today.setHours(0,0,0,0);
+
+      for (let d = startDay; d <= endDay; d++) {
+        const dateCheck = new Date(year, month, d);
+        if (dateCheck.getDay() !== 0 && dateCheck.getDay() !== 6) { 
+          totalBusinessDays++;
+          if (dateCheck >= today) remainingDays++;
+        }
+      }
+      return { totalBusinessDays, remainingDays, startDay, endDay };
+    };
+
+    // 🎯 FUNCIONES MEJORADAS PARA ANALYTICS
+    const calculateCommission = (sale) => {
+      const status = sale.estatus;
+      const rate = COMMISSION_CONFIG[status] || 0;
+      const baseAmount = sale.monto_dispersado || sale.monto_preaprobado || 0;
+      return baseAmount * rate;
+    };
+
+    const predictCashFlow = (sales, days = 30) => {
+      const today = new Date();
+      const prediction = [];
+      
+      for (let i = 0; i < days; i++) {
+        const date = new Date(today);
+        date.setDate(date.getDate() + i);
+        
+        const dateStr = date.toISOString().split('T')[0];
+        const expectedDispersals = sales
+          .filter(s => {
+            const saleDate = parseDate(s.fecha);
+            return saleDate.toISOString().split('T')[0] === dateStr && s.estatus === 'Dispersado';
+          })
+          .reduce((acc, s) => acc + (s.monto_dispersado || 0), 0);
+        
+        prediction.push({ date: dateStr, amount: expectedDispersals });
+      }
+      
+      return prediction;
+    };
+
+    const getAgentPerformance = (sales, agentEmail) => {
+      const agentSales = sales.filter(s => s.agentEmail === agentEmail);
+      const total = agentSales.length;
+      const dispersed = agentSales.filter(s => s.estatus === 'Dispersado').length;
+      const conversionRate = total > 0 ? (dispersed / total * 100).toFixed(2) : 0;
+      const totalDisposed = agentSales.filter(s => s.estatus === 'Dispersado').reduce((acc, s) => acc + (s.monto_dispersado || 0), 0);
+      const totalCommission = agentSales.reduce((acc, s) => acc + calculateCommission(s), 0);
+      
+      return { total, dispersed, conversionRate, totalDisposed, totalCommission, agentSales };
+    };
+
+    // 🎯 COMPONENTE: ALERT CARDS
+    const AlertCard = ({ type, title, message, action }) => {
+      const bgColor = {
+        'warning': 'bg-yellow-50 border-yellow-200',
+        'success': 'bg-green-50 border-green-200',
+        'error': 'bg-red-50 border-red-200',
+        'info': 'bg-blue-50 border-blue-200'
+      }[type] || 'bg-blue-50 border-blue-200';
+
+      const iconColor = {
+        'warning': 'text-yellow-600',
+        'success': 'text-green-600',
+        'error': 'text-red-600',
+        'info': 'text-blue-600'
+      }[type] || 'text-blue-600';
+
+      const icons = {
+        'warning': 'fa-exclamation-triangle',
+        'success': 'fa-check-circle',
+        'error': 'fa-times-circle',
+        'info': 'fa-info-circle'
+      };
+
+      return (
+        <div className={`${bgColor} border p-3 rounded-lg flex items-start gap-3 mb-2`}>
+          <i className={`fas ${icons[type]} ${iconColor} mt-1 text-lg flex-shrink-0`}></i>
+          <div className="flex-1">
+            <p className="font-bold text-sm">{title}</p>
+            <p className="text-xs text-slate-600 mt-1">{message}</p>
+            {action && <button onClick={action.onClick} className="text-xs font-bold mt-2 underline">{action.label}</button>}
+          </div>
+        </div>
+      );
+    };
+
+    // 🎯 COMPONENTE: ESTADÍSTICAS MEJORADAS
+    const StatCard = ({ icon, label, value, subValue, trend, color = 'blue' }) => {
+      const colorMap = {
+        'blue': 'bg-blue-100 text-blue-700',
+        'green': 'bg-green-100 text-green-700',
+        'red': 'bg-red-100 text-red-700',
+        'purple': 'bg-purple-100 text-purple-700',
+        'yellow': 'bg-yellow-100 text-yellow-700'
+      };
+
+      return (
+        <div className="stat-card bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+          <div className="flex items-start justify-between">
+            <div className="flex-1">
+              <p className="text-xs text-slate-500 font-bold uppercase mb-1">{label}</p>
+              <p className="text-2xl font-black text-slate-900">{value}</p>
+              {subValue && <p className="text-xs text-slate-500 mt-1">{subValue}</p>}
+              {trend && <p className={`text-xs font-bold mt-2 ${trend > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                <i className={`fas fa-arrow-${trend > 0 ? 'up' : 'down'} mr-1`}></i>{Math.abs(trend)}%
+              </p>}
+            </div>
+            <div className={`${colorMap[color]} w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0`}>
+              <i className={`fas ${icon} text-lg`}></i>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // 🎯 LOGIN MEJORADO
+    const Login = () => {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [isRegistering, setIsRegistering] = useState(false);
+      const [error, setError] = useState('');
+      const [loading, setLoading] = useState(false);
+
+      const handleGoogleLogin = () => {
+        setLoading(true);
+        const provider = new firebase.auth.GoogleAuthProvider();
+        auth.signInWithPopup(provider).catch(err => {
+          setError("Error con Google: " + err.message);
+          setLoading(false);
+        });
+      };
+
+      const handleEmailAuth = (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+        if (isRegistering) {
+          auth.createUserWithEmailAndPassword(email, password)
+            .then(() => setLoading(false))
+            .catch(err => {
+              setError(err.code === 'auth/email-already-in-use' ? 'El correo ya está registrado.' : err.message);
+              setLoading(false);
+            });
+        } else {
+          auth.signInWithEmailAndPassword(email, password)
+            .then(() => setLoading(false))
+            .catch(err => {
+              setError(err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' ? 'Datos incorrectos.' : err.message);
+              setLoading(false);
+            });
+        }
+      };
+
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800 text-slate-900 p-4">
+          <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-sm flex flex-col items-center border-t-4 border-blue-600">
+            <i className="fas fa-chart-line text-5xl text-blue-600 mb-4"></i>
+            <h1 className="text-2xl font-black mb-1">CRM Ventas Pro</h1>
+            <p className="text-sm text-slate-500 mb-6">{isRegistering ? 'Crear cuenta' : 'Acceso Agentes'}</p>
+
+            {error && <AlertCard type="error" title="Error de autenticación" message={error} />}
+
+            <form onSubmit={handleEmailAuth} className="w-full flex flex-col gap-3 mb-6">
+              <input type="email" placeholder="Correo electrónico" required value={email} onChange={e => setEmail(e.target.value)} disabled={loading} className="w-full border p-2 rounded focus:outline-none focus:border-blue-500 disabled:bg-slate-100" />
+              <input type="password" placeholder="Contraseña" required value={password} onChange={e => setPassword(e.target.value)} disabled={loading} className="w-full border p-2 rounded focus:outline-none focus:border-blue-500 disabled:bg-slate-100" />
+              <button type="submit" disabled={loading} className="w-full bg-blue-600 text-white py-2 rounded font-bold hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                {loading ? <i className="fas fa-spinner fa-spin mr-2"></i> : ''} {isRegistering ? 'Registrar' : 'Ingresar'}
+              </button>
+            </form>
+
+            <div className="relative w-full mb-6">
+              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-300"></div></div>
+              <div className="relative flex justify-center text-sm"><span className="px-2 bg-white text-slate-500">O continúa con</span></div>
+            </div>
+
+            <button onClick={handleGoogleLogin} disabled={loading} className="w-full border-2 border-slate-300 py-2 rounded font-bold hover:bg-slate-50 disabled:opacity-50 transition-colors flex items-center justify-center gap-2">
+              <i className="fab fa-google"></i> Google
+            </button>
+
+            <button type="button" onClick={() => setIsRegistering(!isRegistering)} className="mt-4 text-sm text-blue-600 hover:underline font-bold">
+              {isRegistering ? '¿Ya tienes cuenta? Inicia sesión' : '¿No tienes cuenta? Regístrate'}
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    // 🎯 COMPONENTE PRINCIPAL APP - SERÁ MÁS GRANDE
+    const App = ({ user }) => {
+      const [sales, setSales] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [currentDate, setCurrentDate] = useState(new Date());
+      const [currentQuincena, setCurrentQuincena] = useState(getQuincena(new Date()));
+      const [showForm, setShowForm] = useState(false);
+      const [editSaleData, setEditSaleData] = useState(null);
+      const [acceptOfferData, setAcceptOfferData] = useState(null);
+      const [realAmount, setRealAmount] = useState('');
+      const [lostData, setLostData] = useState(null);
+      const [lostReason, setLostReason] = useState('');
+      const [formError, setFormError] = useState('');
+      const [draggedSale, setDraggedSale] = useState(null);
+      const [draggedOverStatus, setDraggedOverStatus] = useState(null);
+      const [searchTerm, setSearchTerm] = useState('');
+      const [filterStatus, setFilterStatus] = useState('Todos');
+      const [selectedAgent, setSelectedAgent] = useState('Todos');
+      const [activeTab, setActiveTab] = useState('pipeline');
+      const [auditLog, setAuditLog] = useState([]);
+      const [metaData, setMetaData] = useState({});
+
+      // Cargar datos
+      useEffect(() => {
+        const userEmail = user.email;
+        const unsub = db.collection('sales')
+          .where('agentEmail', '==', userEmail)
+          .orderBy('fecha', 'desc')
+          .onSnapshot(
+            snap => {
+              const docs = snap.docs.map(d => ({id: d.id, ...d.data()}));
+              setSales(docs);
+              setLoading(false);
+            },
+            error => {
+              console.error("Error al cargar datos:", error);
+              setLoading(false);
+            }
+          );
+        
+        return () => unsub();
+      }, [user.email]);
+
+      // Cargar metas
+      useEffect(() => {
+        const year = currentDate.getFullYear();
+        const month = currentDate.getMonth();
+        db.collection('metas').doc(`${year}-${month}`).get().then(doc => {
+          if (doc.exists) setMetaData(doc.data());
+        });
+      }, [currentDate]);
+
+      const saveMeta = async (data) => {
+        const year = currentDate.getFullYear();
+        const month = currentDate.getMonth();
+        await db.collection('metas').doc(`${year}-${month}`).set(data, { merge: true });
+      };
+
+      // Añadir a log de auditoría
+      const addAuditLog = useCallback((action, details) => {
+        const log = {
+          timestamp: new Date(),
+          user: user.email,
+          action,
+          details
+        };
+        setAuditLog(prev => [log, ...prev].slice(0, 50));
+      }, [user.email]);
+
+      // Filtrar ventas
+      const filteredSales = useMemo(() => {
+        return sales.filter(sale => {
+          const matchesSearch = !searchTerm || 
+            sale.nombre_cliente.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            sale.folio.includes(searchTerm);
+          const matchesStatus = filterStatus === 'Todos' || sale.estatus === filterStatus;
+          return matchesSearch && matchesStatus;
+        });
+      }, [sales, searchTerm, filterStatus]);
+
+      // Grupos de estado
+      const salesByStatus = useMemo(() => {
+        const grouped = {};
+        PIPELINE_STATUSES.forEach(status => {
+          grouped[status] = filteredSales.filter(s => s.estatus === status);
+        });
+        return grouped;
+      }, [filteredSales]);
+
+      // ANALYTICS
+      const analytics = useMemo(() => {
+        const total = sales.length;
+        const dispersed = sales.filter(s => s.estatus === 'Dispersado');
+        const totalDispersed = dispersed.reduce((acc, s) => acc + (s.monto_dispersado || 0), 0);
+        const totalPipeline = sales.filter(s => !['Dispersado','Rechazado','Cancelado','Expirado'].includes(s.estatus)).reduce((acc, s) => acc + (s.monto_preaprobado || 0), 0);
+        const totalCommission = sales.reduce((acc, s) => acc + calculateCommission(s), 0);
+        const conversionRate = total > 0 ? ((dispersed.length / total) * 100).toFixed(2) : 0;
+        
+        return { total, dispersed: dispersed.length, totalDispersed, totalPipeline, totalCommission, conversionRate };
+      }, [sales]);
+
+      // Operaciones CRUD
+      const handleAddSale = async (e) => {
+        e.preventDefault();
+        setFormError('');
+        
+        const formData = new FormData(e.target);
+        const folio = formData.get('folio');
+        
+        if (sales.some(s => s.folio === folio)) {
+          setFormError('El folio ya existe.');
+          return;
+        }
+
+        const newSale = {
+          folio,
+          nombre_cliente: formData.get('client'),
+          monto_preaprobado: Number(formData.get('amount')),
+          telefono: formData.get('phone'),
+          url: formData.get('url'),
+          estatus: 'Con oferta',
+          agentEmail: user.email,
+          fecha: new Date(),
+          isUpper: formData.get('isUpper') === 'on',
+          monto_dispersado: 0
+        };
+
+        try {
+          await db.collection('sales').add(newSale);
+          setShowForm(false);
+          e.target.reset();
+          addAuditLog('CREATE', `Lead ${folio} creado: ${newSale.nombre_cliente}`);
+        } catch (error) {
+          setFormError('Error al guardar: ' + error.message);
+        }
+      };
+
+      const handleEditSubmit = async (e) => {
+        e.preventDefault();
+        setFormError('');
+
+        const formData = new FormData(e.target);
+        const updates = {
+          folio: formData.get('folio'),
+          nombre_cliente: formData.get('client'),
+          monto_preaprobado: Number(formData.get('amount')),
+          telefono: formData.get('phone'),
+          url: formData.get('url')
+        };
+
+        try {
+          await db.collection('sales').doc(editSaleData.id).update(updates);
+          setEditSaleData(null);
+          addAuditLog('UPDATE', `Lead ${updates.folio} actualizado`);
+        } catch (error) {
+          setFormError('Error al actualizar: ' + error.message);
+        }
+      };
+
+      const handleDragStart = (e, sale) => {
+        setDraggedSale(sale);
+        e.dataTransfer.effectAllowed = 'move';
+      };
+
+      const handleDragOver = (e, status) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        setDraggedOverStatus(status);
+      };
+
+      const handleDrop = async (e, newStatus) => {
+        e.preventDefault();
+        setDraggedOverStatus(null);
+        
+        if (!draggedSale || newStatus === draggedSale.estatus) return;
+
+        if (['Rechazado', 'Cancelado', 'Expirado'].includes(newStatus) && draggedSale.estatus !== 'Rechazado' && draggedSale.estatus !== 'Cancelado' && draggedSale.estatus !== 'Expirado') {
+          setLostData({ ...draggedSale, newStatus });
+          setDraggedSale(null);
+          return;
+        }
+
+        if (newStatus === 'Acepta oferta') {
+          setAcceptOfferData(draggedSale);
+          setRealAmount('');
+          setDraggedSale(null);
+          return;
+        }
+
+        try {
+          const updateData = { estatus: newStatus };
+          if (newStatus === 'Dispersado' && !draggedSale.monto_dispersado) {
+            updateData.monto_dispersado = draggedSale.monto_preaprobado;
+          }
+          
+          await db.collection('sales').doc(draggedSale.id).update(updateData);
+          addAuditLog('STATUS_CHANGE', `${draggedSale.folio}: ${draggedSale.estatus} → ${newStatus}`);
+        } catch (error) {
+          console.error('Error actualizando estatus:', error);
+        }
+
+        setDraggedSale(null);
+      };
+
+      const confirmAcceptOffer = async () => {
+        try {
+          const amount = Number(realAmount) || acceptOfferData.monto_preaprobado;
+          await db.collection('sales').doc(acceptOfferData.id).update({
+            estatus: 'Acepta oferta',
+            monto_dispersado: amount
+          });
+          addAuditLog('ACCEPT_OFFER', `${acceptOfferData.folio}: Aceptada por ${money(amount)}`);
+          setAcceptOfferData(null);
+          setRealAmount('');
+        } catch (error) {
+          console.error('Error:', error);
+        }
+      };
+
+      const confirmLostStatus = async () => {
+        try {
+          await db.collection('sales').doc(lostData.id).update({
+            estatus: lostData.newStatus,
+            razon_perdida: lostReason
+          });
+          addAuditLog('LOST', `${lostData.folio}: ${lostData.newStatus} - ${lostReason}`);
+          setLostData(null);
+          setLostReason('');
+        } catch (error) {
+          console.error('Error:', error);
+        }
+      };
+
+      const exportToExcel = () => {
+        const exportData = filteredSales.map(s => ({
+          'Folio': s.folio,
+          'Cliente': s.nombre_cliente,
+          'Monto Preaprobado': s.monto_preaprobado,
+          'Monto Dispersado': s.monto_dispersado || 0,
+          'Estatus': s.estatus,
+          'Comisión': calculateCommission(s),
+          'Teléfono': s.telefono,
+          'Fecha': formatDateFull(s.fecha),
+          'Es UPPER': s.isUpper ? 'Sí' : 'No'
+        }));
+
+        const ws = XLSX.utils.json_to_sheet(exportData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Ventas');
+        XLSX.writeFile(wb, `Ventas_${formatDateFull(new Date())}.xlsx`);
+        addAuditLog('EXPORT', `Exportadas ${exportData.length} registros a Excel`);
+      };
+
+      if (loading) return (
+        <div className="h-full bg-slate-100 flex flex-col justify-center items-center">
+          <div className="loader mb-4"></div>
+          <p className="font-bold text-slate-500">Cargando tu CRM...</p>
+        </div>
+      );
+
+      return (
+        <div className="h-full flex flex-col bg-slate-100">
+          {/* HEADER */}
+          <div className="bg-white shadow-sm border-b border-slate-200 px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <i className="fas fa-chart-line text-2xl text-blue-600"></i>
+              <div>
+                <h1 className="font-black text-slate-900">CRM Ventas Pro</h1>
+                <p className="text-xs text-slate-500">Q{currentQuincena} • {new Intl.DateTimeFormat('es-MX', { month: 'long', year: 'numeric' }).format(currentDate)}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button onClick={exportToExcel} className="bg-green-600 text-white px-3 py-2 rounded font-bold hover:bg-green-700 text-sm flex items-center gap-2 transition-colors">
+                <i className="fas fa-download"></i> Excel
+              </button>
+              <button onClick={() => auth.signOut()} className="bg-red-600 text-white px-3 py-2 rounded font-bold hover:bg-red-700 text-sm transition-colors">
+                <i className="fas fa-sign-out-alt"></i>
+              </button>
+            </div>
+          </div>
+
+          {/* TABS */}
+          <div className="bg-white border-b border-slate-200 px-4 flex gap-4">
+            {['pipeline', 'analytics', 'audit'].map(tab => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`py-3 px-4 font-bold text-sm transition-colors border-b-2 ${
+                  activeTab === tab
+                    ? 'border-blue-600 text-blue-600'
+                    : 'border-transparent text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <i className={`fas ${tab === 'pipeline' ? 'fa-columns' : tab === 'analytics' ? 'fa-chart-bar' : 'fa-history'} mr-2`}></i>
+                {tab === 'pipeline' ? 'Pipeline' : tab === 'analytics' ? 'Analytics' : 'Auditoría'}
+              </button>
+            ))}
+          </div>
+
+          {/* CONTENIDO */}
+          <div className="flex-1 overflow-auto">
+            {activeTab === 'pipeline' && (
+              <div className="p-4 space-y-4">
+                {/* BUSCADOR Y FILTROS */}
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4 space-y-3">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="Buscar por folio o cliente..."
+                      value={searchTerm}
+                      onChange={e => setSearchTerm(e.target.value)}
+                      className="flex-1 border border-slate-300 rounded px-3 py-2 focus:outline-none focus:border-blue-500"
+                    />
+                    <button onClick={() => setShowForm(true)} className="bg-blue-600 text-white px-4 py-2 rounded font-bold hover:bg-blue-700 flex items-center gap-2 transition-colors">
+                      <i className="fas fa-plus"></i> Lead
+                    </button>
+                  </div>
+
+                  <div className="flex gap-2 flex-wrap">
+                    {['Todos', ...PIPELINE_STATUSES].map(status => (
+                      <button
+                        key={status}
+                        onClick={() => setFilterStatus(status)}
+                        className={`px-3 py-1 rounded text-xs font-bold transition-colors ${
+                          filterStatus === status
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                        }`}
+                      >
+                        {status} ({salesByStatus[status]?.length || 0})
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* ALERTAS INTELIGENTES */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <AlertCard
+                      type="info"
+                      title="Leads sin respuesta"
+                      message={`${sales.filter(s => s.estatus === 'Con oferta' && new Date() - parseDate(s.fecha) > 7*24*60*60000).length} leads hace más de 7 días`}
+                    />
+                    <AlertCard
+                      type="success"
+                      title="Comisión potencial"
+                      message={`Puedes ganar ${money(analytics.totalCommission)} en comisiones`}
+                    />
+                    <AlertCard
+                      type="warning"
+                      title="Pipeline próximo a vencer"
+                      message={`${sales.filter(s => s.estatus === 'Con oferta').length} ofertas activas`}
+                    />
+                  </div>
+                </div>
+
+                {/* ESTADÍSTICAS RÁPIDAS */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <StatCard icon="fa-list" label="Total Leads" value={analytics.total} color="blue" />
+                  <StatCard icon="fa-check-circle" label="Dispersados" value={analytics.dispersed} color="green" />
+                  <StatCard icon="fa-dollar-sign" label="Comisiones" value={money(analytics.totalCommission)} color="purple" />
+                  <StatCard icon="fa-percentage" label="Conversión" value={`${analytics.conversionRate}%`} color="yellow" />
+                </div>
+
+                {/* PIPELINE KANBAN */}
+                <div className="overflow-x-auto">
+                  <div className="flex gap-4 pb-4 min-w-min">
+                    {PIPELINE_STATUSES.map(status => (
+                      <div
+                        key={status}
+                        onDragOver={(e) => handleDragOver(e, status)}
+                        onDrop={(e) => handleDrop(e, status)}
+                        className={`flex-shrink-0 w-80 bg-slate-50 rounded-lg p-3 min-h-96 transition-colors ${
+                          draggedOverStatus === status ? 'drag-over' : ''
+                        }`}
+                      >
+                        <h3 className="font-bold text-sm mb-3 text-slate-700">
+                          {status} <span className="bg-slate-200 px-2 py-0.5 rounded text-xs ml-2">{salesByStatus[status].length}</span>
+                        </h3>
+
+                        <div className="space-y-2 max-h-96 overflow-y-auto">
+                          {salesByStatus[status].map(sale => (
+                            <div
+                              key={sale.id}
+                              draggable
+                              onDragStart={(e) => handleDragStart(e, sale)}
+                              className={`bg-white p-3 rounded border-l-4 cursor-move hover:shadow-md transition-all ${
+                                draggedSale?.id === sale.id ? 'dragging' : ''
+                              } ${
+                                sale.isUpper ? 'border-purple-500 bg-purple-50' : 'border-slate-300'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between">
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-bold text-sm truncate">{sale.folio}</p>
+                                  <p className="text-xs text-slate-600 truncate">{sale.nombre_cliente}</p>
+                                  <p className="text-sm font-bold text-slate-900 mt-1">{money(sale.monto_preaprobado)}</p>
+                                  <p className="text-xs text-slate-500 mt-1">{formatDate(sale.fecha)}</p>
+                                  {sale.isUpper && <span className="inline-block bg-purple-600 text-white px-2 py-0.5 rounded text-xs font-bold mt-1">UPPER</span>}
+                                </div>
+
+                                <div className="flex gap-1 flex-shrink-0 ml-2">
+                                  <button
+                                    onClick={() => setEditSaleData(sale)}
+                                    className="text-blue-600 hover:text-blue-800 p-1"
+                                    title="Editar"
+                                  >
+                                    <i className="fas fa-edit"></i>
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      const url = sale.url;
+                                      if (url) window.open(url, '_blank');
+                                    }}
+                                    className="text-green-600 hover:text-green-800 p-1"
+                                    title="Abrir en Hubspot"
+                                  >
+                                    <i className="fas fa-external-link-alt"></i>
+                                  </button>
+                                </div>
+                              </div>
+
+                              {sale.monto_dispersado > 0 && (
+                                <div className="mt-2 bg-green-100 p-1 rounded text-xs font-bold text-green-700">
+                                  💰 {money(sale.monto_dispersado)}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+
+                          {salesByStatus[status].length === 0 && (
+                            <div className="text-center py-8 text-slate-400">
+                              <i className="fas fa-inbox text-3xl mb-2 block opacity-50"></i>
+                              <p className="text-xs">No hay leads en esta etapa</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'analytics' && (
+              <div className="p-4 space-y-4">
+                {/* MÉTRICAS PRINCIPALES */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <StatCard icon="fa-chart-line" label="Total Dispersado" value={money(analytics.totalDispersed)} subValue={`${analytics.dispersed} transacciones`} color="green" />
+                  <StatCard icon="fa-hourglass-half" label="Pipeline Activo" value={money(analytics.totalPipeline)} subValue={`${sales.filter(s => !['Dispersado','Rechazado','Cancelado','Expirado'].includes(s.estatus)).length} leads`} color="blue" />
+                  <StatCard icon="fa-wallet" label="Comisiones Estimadas" value={money(analytics.totalCommission)} trend={5} color="purple" />
+                  <StatCard icon="fa-bullseye" label="Tasa de Conversión" value={`${analytics.conversionRate}%`} trend={2} color="yellow" />
+                </div>
+
+                {/* TABLA DE DESEMPEÑO */}
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+                  <h3 className="font-bold text-lg mb-4">Detalle de Leads</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-100 border-b">
+                        <tr>
+                          <th className="px-4 py-2 text-left font-bold">Folio</th>
+                          <th className="px-4 py-2 text-left font-bold">Cliente</th>
+                          <th className="px-4 py-2 text-right font-bold">Monto</th>
+                          <th className="px-4 py-2 text-right font-bold">Comisión</th>
+                          <th className="px-4 py-2 text-center font-bold">Estatus</th>
+                          <th className="px-4 py-2 text-left font-bold">Fecha</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredSales.map(sale => (
+                          <tr key={sale.id} className="border-b hover:bg-slate-50">
+                            <td className="px-4 py-2 font-mono font-bold">{sale.folio}</td>
+                            <td className="px-4 py-2">{sale.nombre_cliente}</td>
+                            <td className="px-4 py-2 text-right">{money(sale.monto_preaprobado)}</td>
+                            <td className="px-4 py-2 text-right font-bold text-green-600">{money(calculateCommission(sale))}</td>
+                            <td className="px-4 py-2 text-center">
+                              <span className={`px-2 py-1 rounded text-xs font-bold ${
+                                sale.estatus === 'Dispersado' ? 'bg-green-100 text-green-700' :
+                                sale.estatus === 'Rechazado' ? 'bg-red-100 text-red-700' :
+                                sale.estatus === 'Acepta oferta' ? 'bg-blue-100 text-blue-700' :
+                                'bg-yellow-100 text-yellow-700'
+                              }`}>
+                                {sale.estatus}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-slate-500">{formatDateFull(sale.fecha)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'audit' && (
+              <div className="p-4">
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+                  <h3 className="font-bold text-lg mb-4">Registro de Auditoría</h3>
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {auditLog.length === 0 ? (
+                      <p className="text-slate-500 text-sm text-center py-8">No hay registros aún</p>
+                    ) : (
+                      auditLog.map((log, i) => (
+                        <div key={i} className="border-l-4 border-blue-500 pl-3 py-2 text-sm">
+                          <p className="font-bold text-slate-900">{log.action}</p>
+                          <p className="text-slate-600">{log.details}</p>
+                          <p className="text-xs text-slate-400 mt-1">{new Intl.DateTimeFormat('es-MX', { dateStyle: 'short', timeStyle: 'short' }).format(log.timestamp)}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* MODALES */}
+          {acceptOfferData && (
+            <div className="fixed inset-0 glass-modal z-50 flex items-center justify-center p-4">
+              <div className="bg-white p-5 rounded-lg shadow-xl w-full max-w-sm border-t-4 border-blue-500">
+                <h3 className="font-bold text-lg mb-2 text-blue-700">Confirmar Aceptación</h3>
+                <p className="text-xs text-slate-500 mb-4"><strong>{acceptOfferData.nombre_cliente}</strong> aceptó la oferta. Monto original: <strong>{money(acceptOfferData.monto_preaprobado)}</strong></p>
+                <input type="number" value={realAmount} onChange={(e) => setRealAmount(e.target.value)} placeholder={acceptOfferData.monto_preaprobado} className="w-full border-2 border-blue-400 rounded p-2 text-xl font-bold mb-4 focus:outline-none" autoFocus />
+                <div className="flex gap-2">
+                  <button onClick={confirmAcceptOffer} className="flex-1 bg-blue-600 text-white py-2 rounded font-bold hover:bg-blue-500">Confirmar</button>
+                  <button onClick={() => setAcceptOfferData(null)} className="flex-1 bg-slate-200 py-2 rounded font-bold hover:bg-slate-300">Cancelar</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {lostData && (
+            <div className="fixed inset-0 glass-modal z-50 flex items-center justify-center p-4">
+              <div className="bg-white p-5 rounded-lg shadow-xl w-full max-w-sm border-t-4 border-red-500">
+                <h3 className="font-bold text-lg mb-2 text-red-600">Mover a {lostData.newStatus}</h3>
+                <p className="text-xs text-slate-500 mb-4">Indica el motivo de la pérdida:</p>
+                <select value={lostReason} onChange={(e) => setLostReason(e.target.value)} className="w-full border-2 border-slate-300 rounded p-2 mb-4 focus:outline-none">
+                  <option value="">Selecciona un motivo...</option>
+                  {LOST_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <div className="flex gap-2">
+                  <button onClick={confirmLostStatus} className="flex-1 bg-red-600 text-white py-2 rounded font-bold hover:bg-red-700">Confirmar</button>
+                  <button onClick={() => setLostData(null)} className="flex-1 bg-slate-200 py-2 rounded font-bold hover:bg-slate-300">Cancelar</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showForm && (
+            <div className="fixed inset-0 glass-modal z-50 flex items-center justify-center p-4">
+              <form onSubmit={handleAddSale} className="bg-white rounded-lg shadow-xl w-full max-w-sm p-5 space-y-4">
+                <h2 className="font-bold text-lg border-b pb-2">Nuevo Lead</h2>
+                {formError && <AlertCard type="error" title="Error" message={formError} />}
+                <input name="folio" required placeholder="Número de Folio" className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="client" required placeholder="Nombre del Cliente" className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="amount" type="number" required placeholder="Monto Preaprobado ($)" className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="phone" placeholder="Teléfono" className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="url" placeholder="Enlace a Hubspot" className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" name="isUpper" className="w-4 h-4" />
+                  <span className="text-sm font-bold">Campaña UPPER</span>
+                </label>
+                <div className="flex gap-2">
+                  <button type="submit" className="flex-1 bg-blue-600 text-white py-2 rounded font-bold hover:bg-blue-700">Guardar</button>
+                  <button type="button" onClick={() => setShowForm(false)} className="flex-1 bg-slate-200 py-2 rounded font-bold hover:bg-slate-300">Cancelar</button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {editSaleData && (
+            <div className="fixed inset-0 glass-modal z-50 flex items-center justify-center p-4">
+              <form onSubmit={handleEditSubmit} className="bg-white rounded-lg shadow-xl w-full max-w-sm p-5 space-y-4">
+                <h2 className="font-bold text-lg border-b pb-2">Editar Lead</h2>
+                {formError && <AlertCard type="error" title="Error" message={formError} />}
+                <input name="folio" defaultValue={editSaleData.folio} required className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="client" defaultValue={editSaleData.nombre_cliente} required className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="amount" type="number" defaultValue={editSaleData.monto_preaprobado} required className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="phone" defaultValue={editSaleData.telefono} className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <input name="url" defaultValue={editSaleData.url} className="w-full border p-2 rounded focus:outline-none focus:border-blue-500" />
+                <div className="flex gap-2">
+                  <button type="submit" className="flex-1 bg-slate-800 text-white py-2 rounded font-bold hover:bg-slate-700">Actualizar</button>
+                  <button type="button" onClick={() => setEditSaleData(null)} className="flex-1 bg-slate-200 py-2 rounded font-bold hover:bg-slate-300">Cancelar</button>
+                </div>
+              </form>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // 🎯 WRAPPER PRINCIPAL
+    const MainWrapper = () => {
+      const [user, setUser] = useState(null);
+      const [loadingAuth, setLoadingAuth] = useState(true);
+
+      useEffect(() => {
+        return auth.onAuthStateChanged((u) => {
+          setUser(u);
+          setLoadingAuth(false);
+        });
+      }, []);
+
+      if (loadingAuth) return (
+        <div className="h-screen bg-slate-900 flex flex-col justify-center items-center text-white">
+          <div className="loader mb-4"></div>
+          <p className="font-bold text-slate-400">Verificando seguridad...</p>
+        </div>
+      );
+      
+      if (!user) return <Login />;
+      return <App user={user} />;
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<MainWrapper />);
+  </script>
+</body>
+</html>

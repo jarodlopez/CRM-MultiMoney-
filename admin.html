@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CRM Admin - Dashboard BI Avanzado</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #f1f1f1; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #8b5cf6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .stat-card { transition: all 0.3s ease; }
+    .stat-card:hover { transform: translateY(-2px); }
+    .chart-container { position: relative; height: 300px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 h-screen flex flex-col overflow-hidden">
+  
+  <div id="root" class="h-full flex flex-col"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAAETou6DhYIJJ8cxI13BU1p_l3yGPMilA",
+      authDomain: "ventas-ebd49.firebaseapp.com",
+      projectId: "ventas-ebd49",
+      storageBucket: "ventas-ebd49.firebasestorage.app",
+      messagingSenderId: "907042495792",
+      appId: "1:907042495792:web:6827da0b73333496f6bcf5"
+    };
+    
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const auth = firebase.auth();
+
+    const COMMISSION_CONFIG = {
+      'Dispersado': 0.02,
+      'Acepta oferta': 0.005,
+      'Long track': 0.0025
+    };
+
+    const parseDate = (input) => {
+      if (!input) return new Date();
+      if (input.toDate) return input.toDate();
+      const d = new Date(input);
+      return isNaN(d) ? new Date() : d;
+    };
+
+    const money = (val) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(val || 0);
+    const formatDate = (input) => new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }).format(parseDate(input));
+
+    const getAgentName = (email) => email ? email.split('@')[0] : 'Sin asignar';
+
+    const calculateCommission = (sale) => {
+      const rate = COMMISSION_CONFIG[sale.estatus] || 0;
+      const baseAmount = sale.monto_dispersado || sale.monto_preaprobado || 0;
+      return baseAmount * rate;
+    };
+
+    const AdminDashboard = ({ user }) => {
+      const [allSales, setAllSales] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [selectedAgent, setSelectedAgent] = useState('Todos');
+      const [dateRange, setDateRange] = useState('mes'); // 'semana', 'mes', 'trimestre', 'todo'
+      const [activeTab, setActiveTab] = useState('overview');
+
+      // Cargar todas las ventas
+      useEffect(() => {
+        const unsub = db.collection('sales')
+          .orderBy('fecha', 'desc')
+          .onSnapshot(
+            snap => {
+              const docs = snap.docs.map(d => ({id: d.id, ...d.data()}));
+              setAllSales(docs);
+              setLoading(false);
+            },
+            error => {
+              console.error("Error:", error);
+              setLoading(false);
+            }
+          );
+        return () => unsub();
+      }, []);
+
+      // Filtrar por fecha
+      const getFilteredSalesByDate = () => {
+        const now = new Date();
+        let startDate = new Date();
+
+        switch(dateRange) {
+          case 'semana':
+            startDate.setDate(now.getDate() - 7);
+            break;
+          case 'mes':
+            startDate.setMonth(now.getMonth() - 1);
+            break;
+          case 'trimestre':
+            startDate.setMonth(now.getMonth() - 3);
+            break;
+          default:
+            startDate = new Date('2020-01-01');
+        }
+
+        return allSales.filter(s => parseDate(s.fecha) >= startDate);
+      };
+
+      const filteredByDate = getFilteredSalesByDate();
+
+      // Filtrar por agente
+      const filteredSales = useMemo(() => {
+        if (selectedAgent === 'Todos') return filteredByDate;
+        return filteredByDate.filter(s => getAgentName(s.agentEmail) === selectedAgent);
+      }, [filteredByDate, selectedAgent]);
+
+      const agents = useMemo(() => {
+        const names = allSales.map(s => getAgentName(s.agentEmail));
+        return ['Todos', ...new Set(names)].sort();
+      }, [allSales]);
+
+      // ANALYTICS PRINCIPALES
+      const analytics = useMemo(() => {
+        const total = filteredSales.length;
+        const dispersed = filteredSales.filter(s => s.estatus === 'Dispersado');
+        const rejected = filteredSales.filter(s => s.estatus === 'Rechazado');
+        const inProgress = filteredSales.filter(s => !['Dispersado', 'Rechazado', 'Cancelado', 'Expirado'].includes(s.estatus));
+
+        const totalDispersed = dispersed.reduce((acc, s) => acc + (s.monto_dispersado || 0), 0);
+        const totalRejected = rejected.reduce((acc, s) => acc + (s.monto_preaprobado || 0), 0);
+        const totalInProgress = inProgress.reduce((acc, s) => acc + (s.monto_preaprobado || 0), 0);
+        const totalCommission = filteredSales.reduce((acc, s) => acc + calculateCommission(s), 0);
+        const conversionRate = total > 0 ? ((dispersed.length / total) * 100).toFixed(2) : 0;
+
+        return {
+          total,
+          dispersed: dispersed.length,
+          rejected: rejected.length,
+          inProgress: inProgress.length,
+          totalDispersed,
+          totalRejected,
+          totalInProgress,
+          totalCommission,
+          conversionRate
+        };
+      }, [filteredSales]);
+
+      // DESEMPEÑO POR AGENTE
+      const agentPerformance = useMemo(() => {
+        const performance = {};
+        allSales.forEach(sale => {
+          const agent = getAgentName(sale.agentEmail);
+          if (!performance[agent]) {
+            performance[agent] = {
+              total: 0,
+              dispersed: 0,
+              rejected: 0,
+              totalDispersed: 0,
+              totalCommission: 0,
+              upperCampaigns: 0
+            };
+          }
+          performance[agent].total++;
+          if (sale.estatus === 'Dispersado') {
+            performance[agent].dispersed++;
+            performance[agent].totalDispersed += sale.monto_dispersado || 0;
+          }
+          if (sale.estatus === 'Rechazado') performance[agent].rejected++;
+          if (sale.isUpper) performance[agent].upperCampaigns++;
+          performance[agent].totalCommission += calculateCommission(sale);
+        });
+        return Object.entries(performance).map(([agent, data]) => ({
+          agent,
+          ...data,
+          conversionRate: ((data.dispersed / data.total) * 100).toFixed(2)
+        })).sort((a, b) => b.totalDispersed - a.totalDispersed);
+      }, [allSales]);
+
+      // DATOS PARA GRÁFICOS
+      const chartData = useMemo(() => {
+        const statusGroups = {
+          'Dispersado': 0,
+          'Acepta oferta': 0,
+          'Long track': 0,
+          'Con oferta': 0,
+          'Rechazado': 0,
+          'Otros': 0
+        };
+
+        filteredSales.forEach(s => {
+          if (statusGroups.hasOwnProperty(s.estatus)) {
+            statusGroups[s.estatus]++;
+          } else {
+            statusGroups['Otros']++;
+          }
+        });
+
+        return statusGroups;
+      }, [filteredSales]);
+
+      const exportToExcel = () => {
+        const exportData = filteredSales.map(s => ({
+          'Folio': s.folio,
+          'Cliente': s.nombre_cliente,
+          'Agente': getAgentName(s.agentEmail),
+          'Monto Preaprobado': s.monto_preaprobado,
+          'Monto Dispersado': s.monto_dispersado || 0,
+          'Comisión': calculateCommission(s),
+          'Estatus': s.estatus,
+          'Es UPPER': s.isUpper ? 'Sí' : 'No',
+          'Fecha': formatDate(s.fecha)
+        }));
+
+        const ws = XLSX.utils.json_to_sheet(exportData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Ventas');
+        XLSX.writeFile(wb, `Reporte_Admin_${new Date().toISOString().split('T')[0]}.xlsx`);
+      };
+
+      if (loading) return (
+        <div className="h-full bg-slate-50 flex flex-col justify-center items-center">
+          <div className="loader mb-4"></div>
+          <p className="font-bold text-slate-500">Cargando datos...</p>
+        </div>
+      );
+
+      return (
+        <div className="h-full flex flex-col bg-slate-50">
+          {/* HEADER */}
+          <div className="bg-white shadow-sm border-b border-slate-200 px-4 py-3 flex items-center justify-between">
+            <div>
+              <h1 className="font-black text-xl text-slate-900">📊 Dashboard BI Avanzado</h1>
+              <p className="text-xs text-slate-500 mt-1">Supervisión completa del CRM financiero</p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button onClick={exportToExcel} className="bg-green-600 text-white px-3 py-2 rounded font-bold text-sm flex items-center gap-2 hover:bg-green-700">
+                <i className="fas fa-download"></i> Excel
+              </button>
+              <button onClick={() => auth.signOut()} className="bg-red-600 text-white px-3 py-2 rounded font-bold text-sm hover:bg-red-700">
+                <i className="fas fa-sign-out-alt"></i>
+              </button>
+            </div>
+          </div>
+
+          {/* FILTROS Y TABS */}
+          <div className="bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-4">
+            <div className="flex gap-2">
+              {['semana', 'mes', 'trimestre', 'todo'].map(range => (
+                <button
+                  key={range}
+                  onClick={() => setDateRange(range)}
+                  className={`px-3 py-1 rounded text-xs font-bold transition-colors ${
+                    dateRange === range
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                  }`}
+                >
+                  {range === 'semana' ? 'Última semana' : range === 'mes' ? 'Último mes' : range === 'trimestre' ? 'Último trimestre' : 'Todo'}
+                </button>
+              ))}
+            </div>
+
+            <select
+              value={selectedAgent}
+              onChange={e => setSelectedAgent(e.target.value)}
+              className="border border-slate-300 rounded px-3 py-1 text-sm focus:outline-none focus:border-blue-500"
+            >
+              {agents.map(agent => <option key={agent} value={agent}>{agent}</option>)}
+            </select>
+
+            <div className="flex gap-2">
+              {['overview', 'agents', 'detailed'].map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`px-3 py-1 rounded text-xs font-bold transition-colors ${
+                    activeTab === tab
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                  }`}
+                >
+                  {tab === 'overview' ? 'Resumen' : tab === 'agents' ? 'Agentes' : 'Detallado'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* CONTENIDO */}
+          <div className="flex-1 overflow-auto p-4">
+            {activeTab === 'overview' && (
+              <div className="space-y-4">
+                {/* TARJETAS PRINCIPALES */}
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  <div className="stat-card bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                    <p className="text-xs font-bold text-slate-500 uppercase">Total Leads</p>
+                    <p className="text-3xl font-black text-slate-900 mt-1">{analytics.total}</p>
+                    <p className="text-xs text-slate-400 mt-2">{filteredSales.length} en período</p>
+                  </div>
+
+                  <div className="stat-card bg-white p-4 rounded-lg shadow-sm border border-green-200">
+                    <p className="text-xs font-bold text-green-600 uppercase">Dispersados</p>
+                    <p className="text-3xl font-black text-green-700 mt-1">{analytics.dispersed}</p>
+                    <p className="text-xs text-green-600 mt-2">{money(analytics.totalDispersed)}</p>
+                  </div>
+
+                  <div className="stat-card bg-white p-4 rounded-lg shadow-sm border border-purple-200">
+                    <p className="text-xs font-bold text-purple-600 uppercase">Comisiones</p>
+                    <p className="text-3xl font-black text-purple-700 mt-1">{money(analytics.totalCommission)}</p>
+                    <p className="text-xs text-purple-600 mt-2">Estimadas totales</p>
+                  </div>
+
+                  <div className="stat-card bg-white p-4 rounded-lg shadow-sm border border-yellow-200">
+                    <p className="text-xs font-bold text-yellow-600 uppercase">En Progreso</p>
+                    <p className="text-3xl font-black text-yellow-700 mt-1">{analytics.inProgress}</p>
+                    <p className="text-xs text-yellow-600 mt-2">{money(analytics.totalInProgress)}</p>
+                  </div>
+
+                  <div className="stat-card bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                    <p className="text-xs font-bold text-slate-500 uppercase">Conversión</p>
+                    <p className="text-3xl font-black text-slate-900 mt-1">{analytics.conversionRate}%</p>
+                    <p className="text-xs text-slate-400 mt-2">De leads a dispersión</p>
+                  </div>
+                </div>
+
+                {/* GRÁFICOS */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Pie Chart */}
+                  <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                    <h3 className="font-bold text-sm mb-4">Distribución por Estatus</h3>
+                    <div className="flex items-center justify-around">
+                      <div className="text-center">
+                        {Object.entries(chartData).map(([status, count], i) => (
+                          <div key={status} className="text-xs mb-2">
+                            <span className="inline-block w-3 h-3 rounded-full mr-2" style={{backgroundColor: ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#6b7280'][i]}}></span>
+                            {status}: {count}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Metrics */}
+                  <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                    <h3 className="font-bold text-sm mb-4">Métricas Clave</h3>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span>Tasa de Rechazo:</span>
+                        <span className="font-bold text-red-600">{((analytics.rejected / analytics.total) * 100).toFixed(2)}%</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Valor Promedio Lead:</span>
+                        <span className="font-bold">{money(analytics.totalDispersed / Math.max(analytics.dispersed, 1))}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Comisión Promedio:</span>
+                        <span className="font-bold text-green-600">{money(analytics.totalCommission / Math.max(analytics.dispersed, 1))}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Leads UPPER:</span>
+                        <span className="font-bold text-purple-600">{allSales.filter(s => s.isUpper).length}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'agents' && (
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                <h3 className="font-bold text-lg p-4 border-b">Desempeño por Agente</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-100 border-b">
+                      <tr>
+                        <th className="px-4 py-3 text-left font-bold">Agente</th>
+                        <th className="px-4 py-3 text-center font-bold">Total</th>
+                        <th className="px-4 py-3 text-center font-bold">Dispersados</th>
+                        <th className="px-4 py-3 text-center font-bold">Conversión</th>
+                        <th className="px-4 py-3 text-right font-bold">Total Dispersado</th>
+                        <th className="px-4 py-3 text-right font-bold">Comisiones</th>
+                        <th className="px-4 py-3 text-center font-bold">UPPER</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {agentPerformance.map(agent => (
+                        <tr key={agent.agent} className="border-b hover:bg-slate-50">
+                          <td className="px-4 py-3 font-bold text-blue-600">{agent.agent}</td>
+                          <td className="px-4 py-3 text-center">{agent.total}</td>
+                          <td className="px-4 py-3 text-center text-green-600 font-bold">{agent.dispersed}</td>
+                          <td className="px-4 py-3 text-center font-bold">{agent.conversionRate}%</td>
+                          <td className="px-4 py-3 text-right font-bold">{money(agent.totalDispersed)}</td>
+                          <td className="px-4 py-3 text-right font-bold text-green-600">{money(agent.totalCommission)}</td>
+                          <td className="px-4 py-3 text-center text-purple-600 font-bold">{agent.upperCampaigns}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'detailed' && (
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                <h3 className="font-bold text-lg p-4 border-b">Detalle Completo de Leads</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-100 border-b sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-bold">Folio</th>
+                        <th className="px-3 py-2 text-left font-bold">Cliente</th>
+                        <th className="px-3 py-2 text-left font-bold">Agente</th>
+                        <th className="px-3 py-2 text-right font-bold">Monto</th>
+                        <th className="px-3 py-2 text-right font-bold">Dispersado</th>
+                        <th className="px-3 py-2 text-right font-bold">Comisión</th>
+                        <th className="px-3 py-2 text-center font-bold">Estatus</th>
+                        <th className="px-3 py-2 text-left font-bold">Fecha</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredSales.map(sale => (
+                        <tr key={sale.id} className="border-b hover:bg-slate-50">
+                          <td className="px-3 py-2 font-mono font-bold">{sale.folio}</td>
+                          <td className="px-3 py-2">{sale.nombre_cliente}</td>
+                          <td className="px-3 py-2 text-blue-600">{getAgentName(sale.agentEmail)}</td>
+                          <td className="px-3 py-2 text-right">{money(sale.monto_preaprobado)}</td>
+                          <td className="px-3 py-2 text-right font-bold text-green-600">{money(sale.monto_dispersado || 0)}</td>
+                          <td className="px-3 py-2 text-right font-bold text-green-600">{money(calculateCommission(sale))}</td>
+                          <td className="px-3 py-2 text-center">
+                            <span className={`px-2 py-1 rounded text-xs font-bold ${
+                              sale.estatus === 'Dispersado' ? 'bg-green-100 text-green-700' :
+                              sale.estatus === 'Rechazado' ? 'bg-red-100 text-red-700' :
+                              sale.estatus === 'Acepta oferta' ? 'bg-blue-100 text-blue-700' :
+                              'bg-yellow-100 text-yellow-700'
+                            }`}>
+                              {sale.estatus}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">{formatDate(sale.fecha)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    const Login = () => {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [error, setError] = useState('');
+      const [loading, setLoading] = useState(false);
+
+      const handleLogin = (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+        auth.signInWithEmailAndPassword(email, password)
+          .then(() => setLoading(false))
+          .catch(err => {
+            setError(err.message);
+            setLoading(false);
+          });
+      };
+
+      return (
+        <div className="h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800">
+          <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-sm">
+            <i className="fas fa-chart-bar text-5xl text-purple-600 mb-4 block text-center"></i>
+            <h1 className="text-2xl font-black text-center mb-1">Admin Dashboard</h1>
+            <p className="text-sm text-slate-500 text-center mb-6">Supervisión BI Avanzada</p>
+
+            {error && <div className="bg-red-100 text-red-700 p-3 rounded text-xs font-bold mb-4">{error}</div>}
+
+            <form onSubmit={handleLogin} className="space-y-3">
+              <input type="email" placeholder="Email" required value={email} onChange={e => setEmail(e.target.value)} disabled={loading} className="w-full border p-2 rounded focus:outline-none focus:border-purple-500" />
+              <input type="password" placeholder="Password" required value={password} onChange={e => setPassword(e.target.value)} disabled={loading} className="w-full border p-2 rounded focus:outline-none focus:border-purple-500" />
+              <button type="submit" disabled={loading} className="w-full bg-purple-600 text-white py-2 rounded font-bold hover:bg-purple-700 disabled:opacity-50">
+                {loading ? 'Cargando...' : 'Ingresar'}
+              </button>
+            </form>
+          </div>
+        </div>
+      );
+    };
+
+    const MainWrapper = () => {
+      const [user, setUser] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        return auth.onAuthStateChanged(u => {
+          setUser(u);
+          setLoading(false);
+        });
+      }, []);
+
+      if (loading) return (
+        <div className="h-screen flex items-center justify-center bg-slate-900">
+          <div className="loader mb-4"></div>
+        </div>
+      );
+
+      return user ? <AdminDashboard user={user} /> : <Login />;
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<MainWrapper />);
+  </script>
+</body>
+</html>

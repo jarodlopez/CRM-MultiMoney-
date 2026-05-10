@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Generador Inteligente de Ofertas</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .offer-card { transition: all 0.3s ease; }
+    .offer-card:hover { transform: translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.1); }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #ec4899; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900 h-screen flex flex-col overflow-hidden">
+  
+  <div id="root" class="h-full flex flex-col"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAAETou6DhYIJJ8cxI13BU1p_l3yGPMilA",
+      authDomain: "ventas-ebd49.firebaseapp.com",
+      projectId: "ventas-ebd49",
+      storageBucket: "ventas-ebd49.firebasestorage.app",
+      messagingSenderId: "907042495792",
+      appId: "1:907042495792:web:6827da0b73333496f6bcf5"
+    };
+    
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const auth = firebase.auth();
+
+    const money = (val) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(val || 0);
+
+    // Templates predefinidos
+    const TEMPLATES = {
+      'financiero': {
+        name: 'Crédito Financiero',
+        description: 'Oferta estándar para crédito personal',
+        color: 'from-blue-500 to-blue-600',
+        fields: {
+          tasa: 15.5,
+          plazo: 36,
+          comisision: 1.5
+        }
+      },
+      'hipotecario': {
+        name: 'Hipotecario',
+        description: 'Para adquisición de inmuebles',
+        color: 'from-green-500 to-green-600',
+        fields: {
+          tasa: 7.2,
+          plazo: 240,
+          comisision: 0.5
+        }
+      },
+      'automotriz': {
+        name: 'Automotriz',
+        description: 'Financiamiento de vehículos',
+        color: 'from-red-500 to-red-600',
+        fields: {
+          tasa: 9.8,
+          plazo: 60,
+          comisision: 1.0
+        }
+      },
+      'express': {
+        name: 'Express',
+        description: 'Crédito rápido y simple',
+        color: 'from-purple-500 to-purple-600',
+        fields: {
+          tasa: 22,
+          plazo: 12,
+          comisision: 2.5
+        }
+      }
+    };
+
+    const OfferGenerator = ({ user }) => {
+      const [sales, setSales] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [selectedSale, setSelectedSale] = useState(null);
+      const [selectedTemplate, setSelectedTemplate] = useState('financiero');
+      const [customParams, setCustomParams] = useState(null);
+      const [generatedOffer, setGeneratedOffer] = useState(null);
+      const [searchTerm, setSearchTerm] = useState('');
+
+      // Cargar leads sin oferta
+      useEffect(() => {
+        const unsub = db.collection('sales')
+          .where('agentEmail', '==', user.email)
+          .where('estatus', '==', 'Con oferta')
+          .onSnapshot(snap => {
+            setSales(snap.docs.map(d => ({id: d.id, ...d.data()})));
+            setLoading(false);
+          });
+        return () => unsub();
+      }, [user.email]);
+
+      const filteredSales = useMemo(() => {
+        return sales.filter(s => 
+          s.nombre_cliente.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          s.folio.includes(searchTerm)
+        );
+      }, [sales, searchTerm]);
+
+      const generateOffer = () => {
+        if (!selectedSale || !selectedTemplate) return;
+
+        const template = TEMPLATES[selectedTemplate];
+        const amount = selectedSale.monto_preaprobado;
+        
+        // Calcular cuota mensual
+        const tasa = template.fields.tasa / 100 / 12;
+        const plazo = template.fields.plazo;
+        const cuota = amount * (tasa * Math.pow(1 + tasa, plazo)) / (Math.pow(1 + tasa, plazo) - 1);
+
+        const offer = {
+          folio: selectedSale.folio,
+          cliente: selectedSale.nombre_cliente,
+          template: template.name,
+          monto: amount,
+          tasa: template.fields.tasa,
+          plazo: plazo,
+          cuotaMensual: cuota,
+          comision: (amount * template.fields.comisision / 100),
+          total: amount + (amount * template.fields.comisision / 100),
+          montoTotal: cuota * plazo,
+          costoTotal: (cuota * plazo) - amount,
+          timestamp: new Date()
+        };
+
+        setGeneratedOffer(offer);
+      };
+
+      const exportOffer = () => {
+        if (!generatedOffer) return;
+
+        const content = `
+OFERTA DE CRÉDITO
+═══════════════════════════════════════════════════════════
+
+DATOS DEL CLIENTE
+─────────────────
+Nombre: ${generatedOffer.cliente}
+Folio: ${generatedOffer.folio}
+Fecha: ${new Date().toLocaleDateString('es-MX')}
+
+CONDICIONES DE LA OFERTA
+────────────────────────
+Tipo de Producto: ${generatedOffer.template}
+Monto Solicitado: ${money(generatedOffer.monto)}
+Tasa de Interés: ${generatedOffer.tasa}% anual
+Plazo: ${generatedOffer.plazo} meses
+
+SIMULACIÓN DE PAGO
+──────────────────
+Cuota Mensual: ${money(generatedOffer.cuotaMensual)}
+Comisión: ${money(generatedOffer.comision)}
+Monto Total a Pagar: ${money(generatedOffer.montoTotal)}
+Costo Total (Intereses): ${money(generatedOffer.costoTotal)}
+
+RESUMEN FINANCIERO
+──────────────────
+Capital: ${money(generatedOffer.monto)}
+Intereses: ${money(generatedOffer.costoTotal)}
+Comisión: ${money(generatedOffer.comision)}
+TOTAL A DESEMBOLSAR: ${money(generatedOffer.total)}
+
+═══════════════════════════════════════════════════════════
+        `;
+
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `Oferta_${generatedOffer.folio}_${new Date().getTime()}.txt`;
+        link.click();
+      };
+
+      if (loading) return (
+        <div className="h-full flex flex-col justify-center items-center bg-slate-100">
+          <div className="loader mb-4"></div>
+          <p className="font-bold text-slate-500">Cargando leads...</p>
+        </div>
+      );
+
+      return (
+        <div className="h-full flex flex-col bg-slate-100">
+          {/* HEADER */}
+          <div className="bg-white shadow-sm border-b border-slate-200 px-4 py-3">
+            <h1 className="font-black text-xl text-slate-900">🎯 Generador Inteligente de Ofertas</h1>
+            <p className="text-xs text-slate-500 mt-1">Crea ofertas personalizadas en segundos</p>
+          </div>
+
+          <div className="flex-1 overflow-auto p-4">
+            <div className="max-w-6xl mx-auto">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* PANEL IZQUIERDO: LEADS */}
+                <div className="md:col-span-1 bg-white rounded-lg shadow-sm border border-slate-200 p-4 flex flex-col max-h-96">
+                  <h2 className="font-bold text-sm mb-3">Mis Leads</h2>
+
+                  <input
+                    type="text"
+                    placeholder="Buscar..."
+                    value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    className="w-full border p-2 rounded text-sm mb-3 focus:outline-none focus:border-blue-500"
+                  />
+
+                  <div className="flex-1 overflow-y-auto space-y-2">
+                    {filteredSales.length === 0 ? (
+                      <p className="text-xs text-slate-500 text-center py-8">No hay leads para generar oferta</p>
+                    ) : (
+                      filteredSales.map(sale => (
+                        <button
+                          key={sale.id}
+                          onClick={() => {
+                            setSelectedSale(sale);
+                            setGeneratedOffer(null);
+                          }}
+                          className={`w-full p-3 rounded transition-all text-left text-sm border ${
+                            selectedSale?.id === sale.id
+                              ? 'bg-blue-100 border-blue-500'
+                              : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          <p className="font-bold text-sm">{sale.folio}</p>
+                          <p className="text-xs text-slate-600 truncate">{sale.nombre_cliente}</p>
+                          <p className="text-xs font-bold mt-1 text-slate-900">{money(sale.monto_preaprobado)}</p>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* PANEL CENTRAL: TEMPLATES */}
+                <div className="md:col-span-1 space-y-4">
+                  <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+                    <h2 className="font-bold text-sm mb-3">Tipo de Oferta</h2>
+                    <div className="space-y-2">
+                      {Object.entries(TEMPLATES).map(([key, template]) => (
+                        <button
+                          key={key}
+                          onClick={() => {
+                            setSelectedTemplate(key);
+                            setGeneratedOffer(null);
+                          }}
+                          className={`w-full p-3 rounded-lg transition-all text-left border-2 ${
+                            selectedTemplate === key
+                              ? `border-slate-800 bg-gradient-to-r ${template.color} text-white`
+                              : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                          }`}
+                        >
+                          <p className="font-bold text-sm">{template.name}</p>
+                          <p className={`text-xs mt-1 ${selectedTemplate === key ? 'text-white text-opacity-90' : 'text-slate-600'}`}>
+                            {template.description}
+                          </p>
+                          <p className={`text-xs font-bold mt-2 ${selectedTemplate === key ? 'text-white' : 'text-slate-900'}`}>
+                            Tasa: {template.fields.tasa}% | Plazo: {template.fields.plazo} meses
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {selectedSale && (
+                    <button
+                      onClick={generateOffer}
+                      className="w-full bg-gradient-to-r from-pink-600 to-pink-700 text-white py-3 rounded-lg font-bold hover:opacity-90 transition-all shadow-lg"
+                    >
+                      <i className="fas fa-magic mr-2"></i> Generar Oferta
+                    </button>
+                  )}
+                </div>
+
+                {/* PANEL DERECHO: OFERTA GENERADA */}
+                <div className="md:col-span-1">
+                  {generatedOffer ? (
+                    <div className="bg-white rounded-lg shadow-lg border-t-4 border-green-500 p-5 space-y-4 offer-card">
+                      <div className="bg-gradient-to-r from-green-50 to-emerald-50 p-4 rounded-lg">
+                        <p className="text-xs text-slate-500 uppercase font-bold">Oferta Generada</p>
+                        <p className="text-2xl font-black text-green-600 mt-1">{money(generatedOffer.monto)}</p>
+                        <p className="text-xs text-slate-600 mt-2">{generatedOffer.cliente}</p>
+                      </div>
+
+                      <div className="space-y-2 text-sm border-t pt-4">
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">Tipo de Producto:</span>
+                          <span className="font-bold">{generatedOffer.template}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">Tasa Anual:</span>
+                          <span className="font-bold">{generatedOffer.tasa}%</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">Plazo:</span>
+                          <span className="font-bold">{generatedOffer.plazo} meses</span>
+                        </div>
+                        <div className="flex justify-between border-t pt-2 mt-2">
+                          <span className="text-slate-600 font-bold">Cuota Mensual:</span>
+                          <span className="font-black text-green-600">{money(generatedOffer.cuotaMensual)}</span>
+                        </div>
+                      </div>
+
+                      <div className="bg-blue-50 p-3 rounded-lg border border-blue-200 text-sm">
+                        <p className="text-xs text-slate-600 mb-2">💰 Resumen Financiero</p>
+                        <div className="space-y-1 text-xs">
+                          <div className="flex justify-between">
+                            <span>Capital:</span>
+                            <span className="font-bold">{money(generatedOffer.monto)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Intereses:</span>
+                            <span className="font-bold text-red-600">{money(generatedOffer.costoTotal)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Comisión:</span>
+                            <span className="font-bold text-purple-600">{money(generatedOffer.comision)}</span>
+                          </div>
+                          <div className="flex justify-between border-t pt-1 mt-1 font-bold">
+                            <span>Total a Pagar:</span>
+                            <span className="text-slate-900">{money(generatedOffer.montoTotal)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={exportOffer}
+                        className="w-full bg-green-600 text-white py-2 rounded-lg font-bold hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <i className="fas fa-download"></i> Descargar Oferta
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          const offer = generatedOffer;
+                          alert(`✅ Oferta para ${offer.cliente} lista para compartir.\n\nMonto: ${money(offer.monto)}\nCuota: ${money(offer.cuotaMensual)} x ${offer.plazo} meses`);
+                        }}
+                        className="w-full bg-blue-600 text-white py-2 rounded-lg font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <i className="fas fa-share-alt"></i> Compartir
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-8 flex flex-col items-center justify-center h-full text-center">
+                      <i className="fas fa-wand-magic-sparkles text-4xl text-slate-300 mb-4"></i>
+                      <p className="text-slate-500 font-bold">Selecciona un lead y tipo de oferta</p>
+                      <p className="text-xs text-slate-400 mt-2">Luego haz clic en "Generar Oferta"</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* FOOTER */}
+          <div className="bg-white border-t border-slate-200 px-4 py-3 flex items-center justify-between">
+            <p className="text-xs text-slate-500">
+              <i className="fas fa-info-circle mr-1"></i> Generador inteligente - Crea ofertas personalizadas al instante
+            </p>
+            <button onClick={() => auth.signOut()} className="bg-red-600 text-white px-3 py-1 rounded text-sm font-bold hover:bg-red-700">
+              Salir
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    const Login = () => {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [error, setError] = useState('');
+
+      const handleLogin = (e) => {
+        e.preventDefault();
+        auth.signInWithEmailAndPassword(email, password)
+          .catch(err => setError(err.message));
+      };
+
+      return (
+        <div className="h-screen flex items-center justify-center bg-gradient-to-br from-pink-900 to-pink-800">
+          <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-sm">
+            <i className="fas fa-wand-magic-sparkles text-5xl text-pink-600 mb-4 block text-center"></i>
+            <h1 className="text-2xl font-black text-center mb-1">Generador de Ofertas</h1>
+            <p className="text-sm text-slate-500 text-center mb-6">Ingresa tus credenciales</p>
+
+            {error && <div className="bg-red-100 text-red-700 p-3 rounded text-xs font-bold mb-4">{error}</div>}
+
+            <form onSubmit={handleLogin} className="space-y-3">
+              <input type="email" placeholder="Email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full border p-2 rounded focus:outline-none focus:border-pink-500" />
+              <input type="password" placeholder="Password" required value={password} onChange={e => setPassword(e.target.value)} className="w-full border p-2 rounded focus:outline-none focus:border-pink-500" />
+              <button type="submit" className="w-full bg-pink-600 text-white py-2 rounded font-bold hover:bg-pink-700">Ingresar</button>
+            </form>
+          </div>
+        </div>
+      );
+    };
+
+    const MainWrapper = () => {
+      const [user, setUser] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        return auth.onAuthStateChanged(u => {
+          setUser(u);
+          setLoading(false);
+        });
+      }, []);
+
+      if (loading) return (
+        <div className="h-screen flex items-center justify-center bg-slate-900">
+          <div className="loader mb-4"></div>
+        </div>
+      );
+
+      return user ? <OfferGenerator user={user} /> : <Login />;
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<MainWrapper />);
+  </script>
+</body>
+</html>
