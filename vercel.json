@@ -1,25 +1,7 @@
 {
-  "buildCommand": "npm run build || true",
-  "outputDirectory": "./",
-  "framework": "static",
-  "env": {
-    "VERCEL_URL": "@vercel_url"
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/$1"
-    }
-  ],
-  "headers": [
-    {
-      "source": "/.*",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=3600"
-        }
-      ]
-    }
-  ]
+  "framework": null,
+  "buildCommand": null,
+  "installCommand": null,
+  "outputDirectory": ".",
+  "cleanUrls": true
 }
